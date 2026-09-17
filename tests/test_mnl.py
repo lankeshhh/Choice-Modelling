@@ -2,56 +2,14 @@ import numpy as np
 import pytest
 import torch
 
-from src.data.synthetic import SyntheticConfig, generate_benchmark
 from src.utils import (
-    set_seed, build_padded_tensors, build_true_utility_tensor, grouped_split,
-    select_by_ids, feature_dim, accuracy, mean_nll, bayes_optimal_nll,
+    set_seed, build_padded_tensors, select_by_ids, feature_dim,
+    accuracy, mean_nll, bayes_optimal_nll,
 )
 from src.models.mnl import (
     fit_mnl_pytorch, fit_mnl_scipy, mnl_nll_and_grad, mnl_hessian,
     mnl_standard_errors, MNL,
 )
-
-
-@pytest.fixture(scope="module")
-def benchmark():
-    set_seed(0)
-    cfg = SyntheticConfig(n_categories=4, items_per_category=4, seed=0)
-    df, items, triads = generate_benchmark(
-        cfg=cfg, strengths=(0.0, 0.5, 1.0, 2.0), n_sets_per_strength=1500, seed=0,
-    )
-    tensors, meta = build_padded_tensors(df, cfg.n_categories)
-    true_u = build_true_utility_tensor(df, tensors[0].shape[1])
-    train_ids, val_ids, test_ids = grouped_split(meta, seed=0)
-    return dict(cfg=cfg, df=df, items=items, tensors=tensors, meta=meta, true_u=true_u,
-                train_ids=train_ids, val_ids=val_ids, test_ids=test_ids)
-
-
-def _fit_mnl_to_convergence(train_tensors, dim, epochs=3000, lr=0.05):
-    """Plain full-batch Adam with no early-stopping bookkeeping.
-
-    fit_mnl_pytorch's "only checkpoint on >1e-5 validation improvement,
-    then reload that checkpoint" logic is correct behavior for real
-    training (that's what makes early stopping a regularizer), but wrong
-    for an MLE-agreement check: it freezes progress the moment improvement
-    dips below 1e-5 per epoch, discarding thousands of further epochs of
-    real convergence even when there's no actual overfitting risk (no
-    honest validation set here). This bug was caught by this exact test:
-    the frozen model's category weights disagreed with scipy's BFGS fit by
-    up to 0.12 no matter how many total epochs were requested, because the
-    returned weights weren't the final ones. A plain convergence loop
-    (below) fixes it for this test; fit_mnl_pytorch's early stopping is
-    left as-is since it's appropriate for the real train/val harness.
-    """
-    X_tr, mask_tr, y_tr = train_tensors
-    model = MNL(dim)
-    optimizer = torch.optim.Adam(model.parameters(), lr=lr)
-    for _ in range(epochs):
-        optimizer.zero_grad()
-        loss = torch.nn.functional.cross_entropy(model(X_tr, mask_tr), y_tr)
-        loss.backward()
-        optimizer.step()
-    return model
 
 
 def test_pytorch_and_scipy_mle_agree(benchmark):
@@ -69,9 +27,15 @@ def test_pytorch_and_scipy_mle_agree(benchmark):
     )
     assert result.success
 
-    # pytorch/Adam fit, run to convergence (see _fit_mnl_to_convergence)
+    # pytorch/Adam fit, run to convergence: patience=None disables early
+    # stopping/checkpointing, since train_tensors is standing in for
+    # val_tensors here and there's no genuine held-out set to regularize
+    # against (see train_choice_model's docstring for why that matters).
     set_seed(0)
-    model = _fit_mnl_to_convergence(train_tensors, feature_dim(benchmark["cfg"].n_categories))
+    model, _ = fit_mnl_pytorch(
+        train_tensors, train_tensors, feature_dim(benchmark["cfg"].n_categories),
+        epochs=3000, lr=0.05, patience=None,
+    )
     with torch.no_grad():
         logits = model(X_tr, mask_tr)
         nll_pytorch = mean_nll(logits, y_tr)

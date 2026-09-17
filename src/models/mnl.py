@@ -26,7 +26,7 @@ import torch
 import torch.nn as nn
 from scipy.optimize import minimize
 
-from src.utils import mean_nll, accuracy
+from src.utils import train_choice_model
 
 
 class MNL(nn.Module):
@@ -57,46 +57,11 @@ def fit_mnl_pytorch(
     epochs: int = 200, lr: float = 0.05, weight_decay: float = 0.0,
     patience: int = 15, verbose: bool = False,
 ):
-    """Train MNL with Adam + early stopping on validation NLL."""
-    X_tr, mask_tr, y_tr = train_tensors
-    X_val, mask_val, y_val = val_tensors
-
+    """Train MNL with Adam + early stopping on validation NLL (see
+    utils.train_choice_model, shared by every model in this project)."""
     model = MNL(feature_dim)
-    optimizer = torch.optim.Adam(model.parameters(), lr=lr, weight_decay=weight_decay)
-
-    best_val_nll = float("inf")
-    best_state = None
-    epochs_since_improve = 0
-    history = []
-
-    for epoch in range(epochs):
-        model.train()
-        optimizer.zero_grad()
-        logits = model(X_tr, mask_tr)
-        loss = torch.nn.functional.cross_entropy(logits, y_tr)
-        loss.backward()
-        optimizer.step()
-
-        model.eval()
-        with torch.no_grad():
-            val_logits = model(X_val, mask_val)
-            val_nll = mean_nll(val_logits, y_val)
-            val_acc = accuracy(val_logits, y_val)
-        history.append(dict(epoch=epoch, train_nll=loss.item(), val_nll=val_nll, val_acc=val_acc))
-
-        if val_nll < best_val_nll - 1e-5:
-            best_val_nll = val_nll
-            best_state = {k: v.clone() for k, v in model.state_dict().items()}
-            epochs_since_improve = 0
-        else:
-            epochs_since_improve += 1
-            if epochs_since_improve >= patience:
-                if verbose:
-                    print(f"early stop at epoch {epoch}, best val_nll={best_val_nll:.4f}")
-                break
-
-    model.load_state_dict(best_state)
-    return model, history
+    return train_choice_model(model, train_tensors, val_tensors, epochs=epochs, lr=lr,
+                               weight_decay=weight_decay, patience=patience, verbose=verbose)
 
 
 def _masked_logsumexp(logits: np.ndarray, mask: np.ndarray) -> np.ndarray:

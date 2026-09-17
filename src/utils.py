@@ -105,6 +105,81 @@ def grouped_split(meta: pd.DataFrame, frac=(0.7, 0.15, 0.15), seed: int = 0):
     return set(train_ids), set(val_ids), set(test_ids)
 
 
+def train_choice_model(
+    model: torch.nn.Module, train_tensors, val_tensors,
+    epochs: int = 200, lr: float = 0.05, weight_decay: float = 0.0,
+    patience: int | None = 15, verbose: bool = False,
+):
+    """Generic training loop shared by every model: full-batch Adam on
+    cross-entropy over the masked choice set. Every model here (MNL,
+    DeepMNL, Set Transformer) only differs in its forward(X, mask) ->
+    logits -- this loop is identical for all three, which is the point:
+    differences in results come from model structure, not from different
+    training procedures.
+
+    patience=int (default): early stopping against val_tensors, the
+    correct behavior for real training against a genuine held-out
+    validation set (it's what makes early stopping a regularizer) --
+    checkpoints model state only on >1e-5 validation-NLL improvement, then
+    reloads the best checkpoint at the end.
+
+    patience=None: skip early stopping and checkpointing entirely; run all
+    `epochs` and return the model's final state as-is. Use this for
+    convergence checks / smoke tests where val_tensors isn't a genuine
+    held-out set (e.g. the same tensors passed as both train and val, to
+    check "does this model+optimizer actually reach the MLE / fit the
+    training data"). With early stopping, once per-epoch improvement on
+    whatever's passed as "val" drops below 1e-5 -- which can happen well
+    before real convergence -- checkpointing freezes and the final reload
+    silently discards every later epoch of real progress, regardless of
+    how many total epochs were requested. This bit MNL's PyTorch/scipy MLE
+    agreement check and DeepMNL's training smoke test before being fixed
+    here; see decisions.md.
+    """
+    X_tr, mask_tr, y_tr = train_tensors
+    X_val, mask_val, y_val = val_tensors
+
+    optimizer = torch.optim.Adam(model.parameters(), lr=lr, weight_decay=weight_decay)
+
+    best_val_nll = float("inf")
+    best_state = None
+    epochs_since_improve = 0
+    history = []
+
+    for epoch in range(epochs):
+        model.train()
+        optimizer.zero_grad()
+        logits = model(X_tr, mask_tr)
+        loss = torch.nn.functional.cross_entropy(logits, y_tr)
+        loss.backward()
+        optimizer.step()
+
+        model.eval()
+        with torch.no_grad():
+            val_logits = model(X_val, mask_val)
+            val_nll = mean_nll(val_logits, y_val)
+            val_acc = accuracy(val_logits, y_val)
+        history.append(dict(epoch=epoch, train_nll=loss.item(), val_nll=val_nll, val_acc=val_acc))
+
+        if patience is None:
+            continue
+
+        if val_nll < best_val_nll - 1e-5:
+            best_val_nll = val_nll
+            best_state = {k: v.clone() for k, v in model.state_dict().items()}
+            epochs_since_improve = 0
+        else:
+            epochs_since_improve += 1
+            if epochs_since_improve >= patience:
+                if verbose:
+                    print(f"early stop at epoch {epoch}, best val_nll={best_val_nll:.4f}")
+                break
+
+    if patience is not None:
+        model.load_state_dict(best_state)
+    return model, history
+
+
 def select_by_ids(tensors, meta: pd.DataFrame, ids: set):
     X, mask, y = tensors
     keep = meta["choice_set_id"].isin(ids).to_numpy()

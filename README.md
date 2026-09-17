@@ -65,7 +65,7 @@ pytest tests/ -v
 
 - [x] Synthetic data generator
 - [x] Classical MNL
-- [ ] DeepMNL
+- [x] DeepMNL
 - [ ] Set-aware Transformer
 - [ ] Shared training/eval harness + comparison report
 - [ ] Comparison notebook

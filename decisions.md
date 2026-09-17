@@ -215,3 +215,82 @@ permanent regression test (on the smaller test fixture, so a looser
 of thing that could silently break (e.g. if a future refactor reintroduced
 the one-hot identifiability bug) without moving NLL enough to be caught by
 the Bayes-optimal check alone.
+
+## 2026-09-07 — DeepMNL (`src/models/deep_mnl.py`)
+
+**Refactor first: extracted `train_choice_model` into `utils.py`.**
+`fit_mnl_pytorch`'s Adam-plus-early-stopping loop is exactly what DeepMNL
+(and later the Transformer) needs too, so pulled it into a generic trainer
+parameterized by the model instance, before it existed twice.
+`fit_mnl_pytorch` is now a two-line wrapper around it. Differences in
+results across the three models are then guaranteed to come from model
+structure, not from accidentally-different training procedures.
+
+**`patience=None` added to `train_choice_model`.** The same
+checkpoint-freeze issue documented under MNL above (only checkpointing on
+>1e-5 validation improvement, then reloading that checkpoint at the end)
+resurfaced in DeepMNL's own "does this model actually learn" smoke test,
+for the identical reason: passing the training set as its own "validation"
+set. Rather than patch around it a third time (it will hit the
+Transformer's smoke test too), fixed it at the source: `patience=None`
+skips checkpointing entirely and returns the model's actual final state
+after running all requested epochs. `fit_mnl_pytorch`'s and
+`fit_deep_mnl`'s real early-stopping behavior (patience=int, the default)
+is unchanged and still correct for genuine train/val use.
+
+**Architecture.** `utility_i = MLP(x_i)`, a 2-hidden-layer (width 32, ReLU)
+network, same weights shared across items and across the set, applied
+independently per item -- `nn.Linear`/`nn.ReLU` broadcast over the leading
+(batch, set) dimensions, so no reshaping is needed and there is no
+computational path for one item's features to reach another item's score.
+No identifiability concerns here the way there were for MNL's linear
+weights (nobody is meant to read individual MLP weights for meaning) --
+DeepMNL is a flexible black-box utility approximator by design, so a
+normal bias-including MLP is fine.
+
+**Verified the "no interaction" claim directly, not just assumed it from
+the architecture.** `test_score_is_independent_of_other_items_in_set`
+takes a batch, perturbs every item's features *except* position 0, and
+asserts position 0's score is bit-identical before and after. This is the
+literal, checkable version of the ablation claim DeepMNL exists to make,
+and it's an exact test (not a statistical one) since it follows from the
+computation graph, not from how well training converged.
+
+**Test-threshold bug (not a model bug): initial smoke-test bound was just
+a guess.** First cut of `test_deep_mnl_fits_training_data` asserted NLL
+should drop by at least 0.3 nats from random init; it failed at an
+observed drop of ~0.208. Checked interactively across epochs
+{150,500,1000} x lr {0.01,0.02} and the converged NLL was stable at
+~1.524 in every case (not an under-training artifact -- confirmed
+`patience=None` was working correctly here too). The 0.3 threshold was
+simply an unfounded guess; lowered to 0.15, comfortably below the observed
+stable value.
+
+**Full-benchmark result (24k sets, same split as MNL): DeepMNL tracks MNL
+almost exactly at every context_strength level**, which is the expected
+and correct ablation outcome, not a null result to be concerned about:
+
+| context_strength | n | MNL NLL | MNL acc | DeepMNL NLL | DeepMNL acc |
+|---|---|---|---|---|---|
+| 0.0 | 3202 | 1.4345 | 0.4441 | 1.4346 | 0.4413 |
+| 0.5 | 138 | 1.6137 | 0.3696 | 1.6102 | 0.3768 |
+| 1.0 | 131 | 1.5591 | 0.4122 | 1.5510 | 0.4122 |
+| 2.0 | 132 | 1.6778 | 0.3258 | 1.6412 | 0.3333 |
+
+At `context_strength=0`, DeepMNL's gap to Bayes-optimal is +0.0015 --
+essentially identical to MNL's own +0.0014 -- confirming an MLP with
+enough capacity recovers a genuinely linear truth just as well as the
+correctly-specified linear model, with no advantage and no disadvantage.
+Both models degrade together as context_strength rises, since neither can
+see the decoy item. This is the whole point of building DeepMNL as a
+separate step: it isolates "does nonlinearity help" (no, because the truth
+here is linear) from "does seeing the rest of the assortment help" (not
+yet tested -- that's what the Set Transformer is for). A large DeepMNL
+advantage over MNL anywhere in this table would have been the surprising,
+investigate-before-trusting result; this isn't that.
+
+`test_deep_mnl_misses_decoy_effect_like_mnl` checks the same story on
+held-out data at the test-fixture scale: DeepMNL's learned P(A) shift from
+decoy presence is required to be < 0.05 in absolute value (expected ~0),
+confirming the architectural guarantee actually shows up in trained
+behavior, not just in a hand-constructed forward-pass probe.
