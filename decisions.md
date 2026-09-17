@@ -471,3 +471,52 @@ actually seen. Also factored the repeated "predicted P(target) over a
 choice-set subset" logic (previously duplicated in the DeepMNL test and
 about to be duplicated a third time here) into
 `utils.predicted_target_share`, used by both test files now.
+
+## 2026-09-07 — Shared harness and comparison report (`src/train.py`, `src/evaluate.py`)
+
+**Split responsibility: `evaluate.py` holds pure metric functions that
+take already-computed logits/predictions, never a model or raw data.**
+This makes every function in it cheap to unit test (`tests/test_evaluate.py`)
+without retraining anything -- hand-constructed logits, a trivial
+"constant scorer" test double standing in for a real model, small
+synthetic dataframes. `train.py` is the orchestration script: generates
+the benchmark, trains all three models on identical splits with the
+hyperparameters already validated in this log (in particular the Set
+Transformer's "extended" config, epochs=1500/patience=100, confirmed
+earlier to reach genuine convergence rather than the under-converged
+first-pass config), evaluates them plus the Bayes-optimal reference, and
+writes `results/metrics.csv`, `results/decoy_shifts.csv`, and
+`results/comparison_report.md`.
+
+Two test-writing mistakes caught by actually running the tests (both
+fixed before commit, consistent with the pattern throughout this log):
+the first stratified-metrics test asserted "both correct"/"both wrong"
+for hand-picked logits where I'd miscalculated argmax by hand twice in a
+row (`[0.0, 2.0]` favors index 1, not 0; a tie `[1.0, 1.0]` with
+`torch.argmax` breaks toward the first index) -- the function's own
+output was correct both times, matching an independently-computed manual
+NLL/accuracy; the fixture just didn't say what I intended.
+
+**Bayes-optimal NLL drops sharply at high decoy_strength (1.3335 at
+decoy_strength=2.0, vs. 1.4331 at decoy_strength=0)** -- worth noting
+since it looks surprising at a glance. This is correct, not a bug: a
+strong boost pushes the true softmax distribution toward near-certainty
+on the target item, which lowers entropy (and therefore the Bayes-optimal
+NLL) even though the *raw* choice-prediction problem intuitively sounds
+"harder" with more going on in the set.
+
+**Ran the real pipeline (not just tests) on the full 24k-set default
+benchmark before committing**, and it reproduced the numbers already
+validated interactively in this log almost exactly (same seed=0
+throughout this whole project): NLL at context_strength=0
+(1.4345/1.4346/1.4339 for MNL/DeepMNL/Transformer, Bayes-optimal 1.4331),
+NLL at context_strength=2.0 (1.6778/1.6412/1.5731), and the Set
+Transformer's decoy-shift diagnostic values (+0.0184/+0.0225/+0.0169/
++0.0188 across decoy_strength 0/0.5/1/2) matching the "extended,
+converged" run to 4 decimal places. No surprises, nothing requiring
+further investigation -- committed `results/metrics.csv`,
+`results/decoy_shifts.csv`, and `results/comparison_report.md` as the
+formal, reproducible version of everything discussed qualitatively
+above. Model checkpoints (`checkpoints/*.pt`) are gitignored, same
+reasoning as `data/` -- regenerate via `python -m src.train` rather than
+committing binary artifacts.
