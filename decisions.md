@@ -294,3 +294,129 @@ held-out data at the test-fixture scale: DeepMNL's learned P(A) shift from
 decoy presence is required to be < 0.05 in absolute value (expected ~0),
 confirming the architectural guarantee actually shows up in trained
 behavior, not just in a hand-constructed forward-pass probe.
+
+## 2026-09-07 — Set Transformer (`src/models/set_transformer.py`)
+
+**Architecture and structural verification** (see the commit message /
+module docstring for the full detail): linear item embedding, 2
+TransformerEncoder layers (d_model=32, 4 heads), masked with
+src_key_padding_mask, no positional encoding (a choice set is unordered,
+so permutation equivariance is the correct inductive bias -- checked
+directly in `test_permutation_equivariance`, not assumed). Also checked
+directly: perturbing only padded slots doesn't change valid-item scores
+(masking polarity is an easy inversion bug), and perturbing *other* real
+items *does* change item 0's score (the direct contrast to DeepMNL's
+independence proof) -- confirming the architecture actually has the
+computational capability the whole benchmark is built to test for.
+
+**The core research-question result -- reported honestly, not the clean
+story initially hoped for.**
+
+On the full 24k-set default benchmark, stratified test NLL/accuracy
+(Transformer trained to genuine convergence -- see below):
+
+| context_strength | n | MNL NLL | DeepMNL NLL | Transformer NLL | MNL acc | DeepMNL acc | Transformer acc |
+|---|---|---|---|---|---|---|---|
+| 0.0 | 3202 | 1.4345 | 1.4346 | 1.4339 | 0.4441 | 0.4413 | 0.4413 |
+| 0.5 | 138 | 1.6137 | 1.6102 | 1.6063 | 0.3696 | 0.3768 | 0.3623 |
+| 1.0 | 131 | 1.5591 | 1.5510 | 1.5407 | 0.4122 | 0.4122 | 0.3893 |
+| 2.0 | 132 | 1.6778 | 1.6412 | 1.5731 | 0.3258 | 0.3333 | 0.3258 |
+
+NLL is modestly, consistently better for the Transformer as
+context_strength rises. Accuracy is *not* a clean win -- it's actually
+slightly worse than MNL/DeepMNL at 0.5 and 1.0, and only ties MNL at 2.0.
+This mixed picture is reported as-is rather than emphasizing only the NLL
+column, which would overstate the result.
+
+**The predicted-probability-shift diagnostic (the sharper test of "did it
+actually learn the mechanism") shows the same story more starkly.**
+Measuring the model's predicted P(A) with vs. without the decoy present
+(the same diagnostic used for DeepMNL, now against the true injected
+shift too):
+
+First pass (300 epochs, standard patience=25 -- did NOT trigger early
+stopping, i.e. not yet converged):
+
+| decoy_strength | true shift | Transformer's predicted shift | fraction captured |
+|---|---|---|---|
+| 0.0 | +0.0047 | +0.0082 | (n/a, true effect ~0) |
+| 0.5 | +0.0459 | +0.0129 | ~28% |
+| 1.0 | +0.1054 | +0.0069 | ~7% |
+| 2.0 | +0.3144 | +0.0087 | ~3% |
+
+Before trusting this, checked whether it was simply undertrained: reran
+with epochs=1500, patience=100. This time early stopping *did* trigger
+(451 epochs), and val_nll was flat across the last 10 checkpoints
+(1.4844-1.4845) -- genuine convergence, not an artifact of stopping too
+early:
+
+| decoy_strength | true shift | Transformer's predicted shift (converged) | fraction captured |
+|---|---|---|---|
+| 0.0 | +0.0047 | +0.0184 | (n/a) |
+| 0.5 | +0.0459 | +0.0225 | ~49% |
+| 1.0 | +0.1054 | +0.0169 | ~16% |
+| 2.0 | +0.3144 | +0.0188 | ~6% |
+
+More training helped somewhat at the low end but the qualitative picture
+is unchanged, and one pattern stands out: **the learned shift is nearly
+flat across all four decoy_strength levels (0.017-0.023) despite the true
+effect spanning a 67x range (0.005-0.314).** The model learned "a decoy is
+present -> apply a small, roughly constant boost," not "apply a boost
+calibrated to how strong this regime's effect actually is."
+
+**Working hypothesis for why, and why it's a benchmark-design fact, not
+(only) a training/capacity failure:** `decoy_strength` is not an
+observable input feature anywhere in x_i -- items in a decoy_strength=2.0
+block and a decoy_strength=0.5 block look statistically identical to the
+model; only the *conditional outcome frequencies* differ, and those
+frequencies are pooled across all four blocks in one cross-entropy
+objective the model cannot condition on regime. The Bayes-optimal
+response *for this model class, given this input*, may genuinely be close
+to a single pooled-average boost rather than four different ones -- the
+model isn't necessarily failing to find an achievable optimum, it may be
+close to the best achievable optimum *without observing the regime*. A
+second, compounding factor: decoy_treated sets are a small minority of
+training data (~3.75% per decoy_strength block), so the aggregate
+cross-entropy loss has limited gradient signal to sharpen this specific
+sub-pattern relative to getting everything else right. Neither hypothesis
+was tested to isolation (e.g. by exposing decoy_strength as an explicit
+feature to see if the ceiling rises) -- flagged as a natural next step,
+not done here to avoid quietly changing the benchmark's information
+content mid-comparison.
+
+**Checked at the smaller scale the automated tests actually use, and the
+signal doesn't reliably survive.** The pytest fixture (6,000 sets, ~1,500
+per decoy_strength level) is deliberately small for fast tests. Re-ran the
+same diagnostic there: MNL/DeepMNL shifts were -0.0071 to +0.0007 (noise,
+as expected -- structurally guaranteed to be unresponsive, per their own
+tests), and the Transformer's shifts were -0.0027 to +0.0037 -- *not*
+reliably distinguishable from that noise floor, and not even consistently
+positive. The modest signal found on the 24k-set benchmark needs that
+scale of data to show up at all.
+
+**Decision: no committed pytest assertion for the decoy-shift magnitude or
+comparison.** Writing one against the small fixture would mean either
+asserting something not reliably true (it isn't reliably positive there)
+or setting a threshold so loose it would also pass for MNL/DeepMNL's pure
+noise -- neither is a meaningful test. This finding is documented here
+instead of encoded as a regression test. What *is* tested and committed:
+the architectural capability (`test_score_depends_on_other_items_in_set`,
+already true at initialization, no data scale required) and the
+structural guarantee that MNL/DeepMNL cannot respond at all
+(`test_score_is_independent_of_other_items_in_set` /
+`test_deep_mnl_misses_decoy_effect_like_mnl`) -- both robust regardless of
+sample size, unlike the Transformer's *quantitative* response magnitude.
+
+**Headline, stated honestly rather than oversold:** the Set Transformer
+shows a real, directionally-correct, but incomplete recovery of the
+injected context effect at this data scale and model capacity. It is
+never worse than MNL/DeepMNL on NLL and modestly better as the effect
+strengthens, its predicted probabilities move in the right direction where
+MNL/DeepMNL structurally cannot move at all, but it captures roughly
+6-50% of the true effect magnitude (worse at higher decoy_strength, where
+it matters most) and doesn't calibrate to how strong the effect actually
+is in a given regime. This is not the clean "Transformer wins decisively"
+story a more optimistic framing might expect -- and per the original
+spec's own instruction not to force the result, it's reported as exactly
+that: a partial, honest validation of the core hypothesis, not a complete
+one.

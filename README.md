@@ -20,6 +20,19 @@ but missing an input it would need. See `decisions.md` for the exact
 mechanism (an asymmetric-dominance decoy effect) and the sanity checks run
 against it.
 
+## Where things stand
+
+MNL and DeepMNL both structurally cannot see the injected context effect
+and don't (verified). The Set Transformer partially can: it's never worse
+than MNL/DeepMNL on log-likelihood and modestly better as the effect
+strengthens, but its learned response captures only ~6-50% of the true
+effect magnitude and doesn't calibrate to how strong the effect actually
+is in a given regime -- a real but incomplete result, not a clean win. See
+`decisions.md` (Set Transformer section) for the full finding, numbers,
+and working hypothesis for why. The formal, reproducible version of this
+comparison lands in `results/comparison_report.md` once the shared
+harness (`train.py`/`evaluate.py`) is built.
+
 ## Setup
 
 ```bash
@@ -66,7 +79,7 @@ pytest tests/ -v
 - [x] Synthetic data generator
 - [x] Classical MNL
 - [x] DeepMNL
-- [ ] Set-aware Transformer
+- [x] Set-aware Transformer
 - [ ] Shared training/eval harness + comparison report
 - [ ] Comparison notebook
 
