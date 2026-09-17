@@ -4,8 +4,11 @@ import torch
 
 from src.utils import (
     set_seed, select_by_ids, feature_dim, mean_nll, bayes_optimal_nll,
+    predicted_target_share,
 )
 from src.models.set_transformer import SetTransformer, fit_set_transformer
+from src.models.mnl import fit_mnl_pytorch
+from src.models.deep_mnl import fit_deep_mnl
 
 
 def test_padded_positions_dont_affect_valid_items(benchmark):
@@ -170,4 +173,68 @@ def test_set_transformer_near_bayes_optimal_at_zero_context_strength(benchmark):
     assert fitted_nll < bayes_nll + 0.05, (
         f"Set Transformer NLL ({fitted_nll:.4f}) too far above Bayes-optimal ({bayes_nll:.4f}) "
         "at context_strength=0"
+    )
+
+
+def test_set_transformer_decoy_shift_exceeds_baselines(benchmark):
+    """The comparative version of the decoy-detection question, and the
+    one that turns out to be robust (see decisions.md for the full
+    investigation). The RAW predicted P(A) shift from decoy presence is
+    *not* a clean signal on its own: decoy_treated sets have one more
+    competing alternative than decoy_control sets by construction (the
+    decoy itself), which mechanically dilutes raw P(A) via the softmax
+    denominator regardless of any genuine attraction effect -- so even a
+    well-fit MNL can show a *negative* raw shift, and that's correct
+    behavior, not a failure to detect anything.
+
+    The fair comparison is therefore relative: does the Transformer show
+    more positive shift than MNL/DeepMNL on top of that shared dilution
+    baseline? Checked across 4 independent data seeds (this fixture's
+    seed=0, plus 1/2/3 run interactively) and the Transformer's mean shift
+    exceeded both baselines' in all 4 -- by margins of +0.0013 to +0.0074
+    (vs MNL) and +0.0028 to +0.0043 (vs DeepMNL). The 0.0005 threshold
+    below is well under every observed margin, leaving real headroom
+    rather than sitting at the edge of what was actually seen.
+
+    This is NOT a claim that the Transformer recovers the true effect
+    magnitude -- it doesn't (see decisions.md: ~6-50% captured, worse at
+    higher decoy_strength, roughly flat across decoy_strength when it
+    should scale). It's a narrower, more defensible claim: the Transformer
+    learns *some* real incremental context-sensitivity that MNL/DeepMNL
+    are structurally unable to learn at all.
+    """
+    tensors, meta = benchmark["tensors"], benchmark["meta"]
+    df = benchmark["df"]
+    dim = feature_dim(benchmark["cfg"].n_categories)
+    n_categories = benchmark["cfg"].n_categories
+    max_set_size = tensors[0].shape[1]
+    train_tensors, _ = select_by_ids(tensors, meta, benchmark["train_ids"])
+    val_tensors, _ = select_by_ids(tensors, meta, benchmark["val_ids"])
+
+    set_seed(0)
+    mnl_model, _ = fit_mnl_pytorch(train_tensors, val_tensors, dim, epochs=500, lr=0.05, patience=25)
+    set_seed(0)
+    deep_model, _ = fit_deep_mnl(train_tensors, val_tensors, dim, epochs=300, patience=25)
+    set_seed(0)
+    tf_model, _ = fit_set_transformer(train_tensors, val_tensors, dim, epochs=300, patience=25)
+
+    def mean_shift(model):
+        shifts = []
+        for gamma in sorted(df["decoy_strength"].unique()):
+            treated = df[(df["scenario"] == "decoy_treated") & (df["decoy_strength"] == gamma)]
+            control = df[(df["scenario"] == "decoy_control") & (df["decoy_strength"] == gamma)]
+            p_t = predicted_target_share(model, treated, n_categories, max_set_size)
+            p_c = predicted_target_share(model, control, n_categories, max_set_size)
+            shifts.append(p_t - p_c)
+        return float(np.mean(shifts))
+
+    mnl_shift = mean_shift(mnl_model)
+    deep_shift = mean_shift(deep_model)
+    tf_shift = mean_shift(tf_model)
+
+    assert tf_shift - mnl_shift > 0.0005, (
+        f"Transformer's mean decoy shift ({tf_shift:+.4f}) not meaningfully above MNL's ({mnl_shift:+.4f})"
+    )
+    assert tf_shift - deep_shift > 0.0005, (
+        f"Transformer's mean decoy shift ({tf_shift:+.4f}) not meaningfully above DeepMNL's ({deep_shift:+.4f})"
     )

@@ -216,3 +216,30 @@ def accuracy(logits: torch.Tensor, y: torch.Tensor) -> float:
 
 def mean_nll(logits: torch.Tensor, y: torch.Tensor) -> float:
     return torch.nn.functional.cross_entropy(logits, y, reduction="mean").item()
+
+
+def predicted_target_share(model: torch.nn.Module, sub_df: pd.DataFrame,
+                            n_categories: int, max_set_size: int) -> float:
+    """Mean predicted P(chosen = target) over a set of choice sets, where
+    "target" is the role=="target" item (A in the decoy triads -- see
+    synthetic.py). Used to measure a fitted model's learned P(A) shift
+    from decoy presence (comparing this on decoy_treated vs decoy_control
+    subsets), the diagnostic for "did the model actually learn to use
+    context, not just fit NLL/accuracy overall."
+
+    build_padded_tensors groups by choice_set_id with sort=True and
+    preserves each group's original row order (0..n-1 after reset_index)
+    -- target_pos below must (and does) use that same order to find each
+    set's target-item position within the padded tensor.
+    """
+    tens, _ = build_padded_tensors(sub_df, n_categories, max_set_size=max_set_size)
+    X, mask, y = tens
+    with torch.no_grad():
+        probs = torch.softmax(model(X, mask), dim=1)
+
+    def target_pos(g):
+        g = g.reset_index(drop=True)
+        return g.index[g["role"] == "target"][0]
+
+    role = sub_df.groupby("choice_set_id", sort=True).apply(target_pos).to_numpy().copy()
+    return probs[np.arange(len(role)), role].mean().item()

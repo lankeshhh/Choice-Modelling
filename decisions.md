@@ -420,3 +420,54 @@ story a more optimistic framing might expect -- and per the original
 spec's own instruction not to force the result, it's reported as exactly
 that: a partial, honest validation of the core hypothesis, not a complete
 one.
+
+**Follow-up: reconsidered the "no committed test" decision after a
+multi-seed check, and it was worth reconsidering.** The raw-shift
+comparison above is confounded in a way worth naming precisely: a
+decoy_treated set has one more competing alternative than its matched
+decoy_control set *by construction* (the decoy itself is the extra item --
+this was the whole point of the earlier filler-count fix, see the
+synthetic-data-generator section above). Adding any extra alternative
+mechanically dilutes raw P(A) through the softmax denominator, regardless
+of whether that alternative carries any genuine attraction effect. A
+perfectly-fit MNL *should* show a negative raw shift from this alone
+whenever the boost is small relative to the dilution -- that's correct
+model behavior, not a detection failure. This explains why several raw
+shifts (including some of the Transformer's own) came out negative in the
+tables above: the metric mixes two effects (dilution, always present and
+negative-ish; genuine attraction boost, positive and specific to whichever
+model can compute it) rather than isolating the second one.
+
+That reframes the right test: not "is the Transformer's raw shift
+positive" (confounded, and not reliably true) but "does the Transformer
+show more net positive shift than MNL/DeepMNL, on top of the same shared
+dilution baseline they all experience." Checked this relative claim across
+4 independent data seeds at fixture scale (this repo's fixture seed=0,
+plus 1/2/3 run interactively, each fitting fresh MNL/DeepMNL/Transformer
+instances):
+
+| seed | MNL mean shift | DeepMNL mean shift | Transformer mean shift | TF - MNL | TF - DeepMNL |
+|---|---|---|---|---|---|
+| 0 | -0.0034 | -0.0032 | -0.0003 | +0.0031 | +0.0028 |
+| 1 | -0.0024 | -0.0027 | +0.0009 | +0.0033 | +0.0036 |
+| 2 | -0.0151 | -0.0120 | -0.0077 | +0.0074 | +0.0043 |
+| 3 | -0.0061 | -0.0090 | -0.0048 | +0.0013 | +0.0042 |
+
+The relative margin (Transformer exceeds both baselines) held in all 4
+seeds without exception, with a minimum margin of +0.0013 (vs MNL) and
++0.0028 (vs DeepMNL) -- small, but a real, reproducible, non-arbitrary-
+direction effect, unlike the raw shift's sign which flips seed to seed.
+This is different in kind from a claim about magnitude recovery (still
+not supported, see above): it's the claim that the Transformer learns
+*some* real incremental context-sensitivity MNL/DeepMNL cannot learn at
+all, which the architecture guarantees is possible and this data confirms
+actually happens, even if only partially.
+
+Added `test_set_transformer_decoy_shift_exceeds_baselines`, asserting
+`mean_shift(Transformer) - mean_shift(MNL) > 0.0005` and the same vs.
+DeepMNL -- comfortably under every observed margin (smallest was +0.0013)
+so there's real headroom, not a threshold sitting at the edge of what was
+actually seen. Also factored the repeated "predicted P(target) over a
+choice-set subset" logic (previously duplicated in the DeepMNL test and
+about to be duplicated a third time here) into
+`utils.predicted_target_share`, used by both test files now.

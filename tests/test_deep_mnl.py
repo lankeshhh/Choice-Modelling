@@ -4,7 +4,7 @@ import torch
 
 from src.utils import (
     set_seed, select_by_ids, feature_dim, accuracy, mean_nll, bayes_optimal_nll,
-    build_padded_tensors,
+    predicted_target_share,
 )
 from src.models.deep_mnl import DeepMNL, fit_deep_mnl
 
@@ -142,26 +142,10 @@ def test_deep_mnl_misses_decoy_effect_like_mnl(benchmark):
     control = df[(df["scenario"] == "decoy_control") & (df["decoy_strength"] == 2.0)]
     assert len(treated) > 0 and len(control) > 0
 
-    def mean_predicted_p_a(sub_df):
-        # build_padded_tensors groups by choice_set_id with sort=True and
-        # preserves each group's original row order (0..n-1 after
-        # reset_index) -- match that exact order to find each set's
-        # target-item position within the padded tensor.
-        tens, _ = build_padded_tensors(sub_df, benchmark["cfg"].n_categories,
-                                        max_set_size=tensors[0].shape[1])
-        X, mask, y = tens
-        with torch.no_grad():
-            probs = torch.softmax(model(X, mask), dim=1)
-
-        def target_pos(g):
-            g = g.reset_index(drop=True)
-            return g.index[g["role"] == "target"][0]
-
-        role = sub_df.groupby("choice_set_id", sort=True).apply(target_pos).to_numpy().copy()
-        return probs[np.arange(len(role)), role].mean().item()
-
-    p_a_treated = mean_predicted_p_a(treated)
-    p_a_control = mean_predicted_p_a(control)
+    max_set_size = tensors[0].shape[1]
+    n_categories = benchmark["cfg"].n_categories
+    p_a_treated = predicted_target_share(model, treated, n_categories, max_set_size)
+    p_a_control = predicted_target_share(model, control, n_categories, max_set_size)
     shift = p_a_treated - p_a_control
 
     # True injected shift at decoy_strength=2.0 is large (empirically an
