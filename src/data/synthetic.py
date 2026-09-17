@@ -196,8 +196,9 @@ def generate_dataset(
         sub = items.loc[set_items]
         boost = np.where(sub.index.to_numpy() == active_decoy_target, decoy_strength, 0.0) \
             if active_decoy_target is not None else np.zeros(len(sub))
+        true_utility = sub["V"].to_numpy() + boost  # effective utility before noise
         eps = _gumbel(len(sub), rng)
-        utility = sub["V"].to_numpy() + boost + eps
+        utility = true_utility + eps
         chosen_pos = int(np.argmax(utility))
 
         for pos, item_id in enumerate(sub.index):
@@ -214,6 +215,11 @@ def generate_dataset(
                 scenario=scenario,
                 decoy_strength=decoy_strength,
                 context_strength=decoy_strength if scenario == "decoy_treated" else 0.0,
+                # true effective utility (V + boost, pre-noise) -- the softmax
+                # of this within a set is the exact Bayes-optimal choice
+                # distribution, used later to benchmark model NLL against the
+                # best any model could theoretically achieve.
+                true_utility=float(true_utility[pos]),
                 chosen=int(pos == chosen_pos),
             ))
 

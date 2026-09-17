@@ -98,3 +98,72 @@ of the confound itself). 6000/level gives ~900 sets per scenario per level,
 - `test_generate_benchmark_covers_all_strengths`: sweep produces the
   expected γ levels, one block of choice sets per level, unique set ids
   across blocks.
+
+## 2026-09-07 — Classical MNL (`src/models/mnl.py`, `src/utils.py`)
+
+**Two fits on purpose.** `fit_mnl_pytorch` (Adam + cross-entropy, the same
+training loop DeepMNL and the Set Transformer will reuse) and
+`fit_mnl_scipy` (closed-form NLL + analytic gradient, BFGS via
+`scipy.optimize.minimize`) are solving the *same* convex MLE problem two
+different ways. Requiring them to agree is the check that the shared
+harness's gradient-descent training is actually doing correct MLE, not
+just producing plausible-looking numbers.
+
+**Bug 1 (real, not a tolerance issue): category one-hot + bias is not
+identified.** First cut used a full `n_categories`-wide one-hot block plus
+a `Linear(..., bias=True)`. PyTorch and scipy converged to the same NLL to
+machine precision but to *different* individual category weights (off by
+~0.1-0.3). Diagnosed by checking `w_pytorch - w_scipy` per category weight
+and finding all four differences were the same constant (~-0.105) — the
+signature of an exactly flat direction in parameter space, not
+optimization noise. Reasoning: a full K-of-K one-hot block sums to exactly
+1 in every row, so shifting every category weight by the same constant `c`
+shifts every item's score by that same `c`, and softmax within a choice
+set is invariant to adding a constant to every item in the set. This holds
+*whether or not* there's a separate bias term — removing just the bias
+(first attempted fix) was necessary but not sufficient. Fixed by using
+`n_categories - 1` dummy columns (category 0 as reference, encoded
+all-zero) together with no bias term. This isn't a hack; it's the standard
+resolution, and it reflects a real, general fact about discrete choice
+models: only utility *differences* between alternatives are ever
+identifiable from choice data, never absolute levels (equivalently: there
+is no free normalization without an outside option of fixed utility).
+Re-verified: with the fix, a full-convergence PyTorch fit and the BFGS fit
+agree to NLL within 1e-7 and max weight difference `6e-5` on a real
+16.8k-set training split.
+
+**Bug 2 (in the training loop's early-stopping logic, not the model):**
+after fixing the identifiability bug, PyTorch and scipy *still* disagreed
+by up to ~0.12 on category weights no matter how many epochs were
+requested (2000, 8000, 20000 all gave bit-identical output). Cause:
+`fit_mnl_pytorch` only checkpoints `best_state` when validation NLL
+improves by more than `1e-5`, then reloads that checkpoint at the end.
+That's correct behavior for real training against a genuine validation
+set (it's what makes early stopping a regularizer). But the MLE-agreement
+test had passed the *training* set as its own "validation" set, and once
+per-epoch improvement dropped below `1e-5` (which happens quickly on a
+convex problem), progress silently froze — thousands of further epochs
+changed nothing because the reload always reverted to the same frozen
+snapshot. Fixed by giving the agreement test its own plain convergence
+loop (`_fit_mnl_to_convergence` in `tests/test_mnl.py`) with no
+checkpoint/reload logic, rather than changing `fit_mnl_pytorch` itself --
+its early-stopping behavior is correct and desired for the real
+train/val/test harness; it was just the wrong tool for an MLE-convergence
+check specifically.
+
+**Bayes-optimal benchmark at `context_strength == 0`.** Added
+`true_utility` to the synthetic generator's output (the pre-noise
+effective utility `V + boost`) so `bayes_optimal_nll` can compute
+cross-entropy against the *true* generating softmax at the realized
+choices -- an unbiased estimate of that distribution's entropy, i.e. the
+best expected NLL any model could achieve. On the full default benchmark
+(24k sets, 16.8k/3.6k/3.6k train/val/test), MNL's held-out NLL at
+`context_strength == 0` (3,202 test sets) was 1.4345 against a
+Bayes-optimal 1.4331 -- a gap of 0.0014 nats, i.e. MNL is essentially at
+the theoretical floor exactly where it's correctly specified. On the
+`context_strength > 0` strata (the decoy-treated slices), NLL rose to
+1.56-1.68 and accuracy fell from 0.44 to 0.33-0.41 -- real degradation
+where MNL is structurally missing the boost term, not a suspiciously clean
+result (strata are small here, ~130-140 test sets each, so the exact
+numbers aren't perfectly monotonic in γ -- expected sampling noise at this
+sample size, not evidence of a problem).

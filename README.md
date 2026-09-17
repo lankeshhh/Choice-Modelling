@@ -64,7 +64,7 @@ pytest tests/ -v
 ## Status
 
 - [x] Synthetic data generator
-- [ ] Classical MNL
+- [x] Classical MNL
 - [ ] DeepMNL
 - [ ] Set-aware Transformer
 - [ ] Shared training/eval harness + comparison report
