@@ -520,3 +520,108 @@ formal, reproducible version of everything discussed qualitatively
 above. Model checkpoints (`checkpoints/*.pt`) are gitignored, same
 reasoning as `data/` -- regenerate via `python -m src.train` rather than
 committing binary artifacts.
+
+## 2026-09-07 — Real-data validation: Bakery (`src/data/bakery.py`, `src/train_bakery.py`)
+
+**Which dataset, and why.** "Bakery" was named in the original project
+spec alongside "Expedia" for later real-data work, with no file or URL
+given. Rather than guess, searched for what's canonically meant in the
+discrete-choice/assortment literature and found
+[Benson, Kumar & Tomkins (WSDM 2018), "A Discrete Choice Model for Subset
+Selection"](https://github.com/arbenson/discrete-subset-choice), which
+bundles a `bakery.txt` dataset (the well-known Extended Bakery basket
+data: 75,000 transactions, 50 unique items). Verified this before
+building anything on top of it (cloned the repo, read the actual data
+format, checked size and cardinality) rather than trusting the search
+summary alone. Vendored the raw file unmodified at
+`src/data/external/bakery.txt` (742KB, small and stable enough to commit
+directly, unlike the gitignored generated `data/`) with a `SOURCE.md`
+carrying attribution and the paper citation.
+
+**Two real structural gaps from the synthetic setting, and how each was
+resolved -- both documented up front rather than discovered as surprises
+partway through, since both were foreseeable from just reading the raw
+data format before writing any conversion code:**
+
+1. **No assortment in the raw data at all.** Each line of `bakery.txt` is
+   a whole *basket* (subset selection) -- items purchased together, not
+   "an assortment was shown, one item was chosen." Considered and rejected
+   a "leave-one-out within the basket" conversion (treat one basket item
+   as chosen, the rest as the choice set) because it's conceptually wrong:
+   every item in a basket was actually purchased, so treating co-purchased
+   items as "rejected alternatives" misrepresents what happened. Instead:
+   for each basket, one item is chosen uniformly at random as the
+   observed choice, and the rest of the choice set is filled with items
+   *not* in that basket, sampled with probability proportional to
+   `popularity^0.75` (standard unigram-negative-sampling practice, e.g.
+   word2vec/implicit-feedback recommenders) rather than uniformly --
+   uniform negatives would make discrimination trivially easy and measure
+   mostly "did the model memorize which items are rare," not choice
+   behavior. This is a real, named approximation: we don't know what a
+   shopper actually saw and rejected, only what they didn't buy that
+   trip. `test_negatives_exclude_original_basket_items` checks the one
+   hard invariant this construction must satisfy (a negative is never
+   something actually in the original basket) by reconstructing the exact
+   basket per `choice_set_id` and checking directly, not a weaker proxy.
+
+2. **No item attributes.** `bakery.txt` has only integer item IDs -- no
+   price, quality, or category. To reuse `featurize()` unchanged (per the
+   goal: only the data loading should change), `category` is set to the
+   item's own identity (each item is its own singleton category, i.e. a
+   per-item fixed effect via the same K-1 dummy encoding used for
+   synthetic categories) and `price_z`/`quality_z` are set to `0.0` for
+   every row -- present so `featurize()`'s column access doesn't break,
+   genuinely uninformative since there's no real price/quality signal to
+   put there. This is stated plainly in the loader's docstring and the
+   report rather than left for a reader to discover by inspecting the
+   data.
+
+**Scale-matched to the synthetic benchmark on purpose.** Subsampled to
+24,000 transactions (from 75,000 available) specifically to match the
+synthetic experiment's scale, so a real-vs-synthetic comparison isn't
+confounded by "more data helps everyone regardless of architecture."
+
+**The result, run once for real and reported as-is:**
+
+| model | n | NLL | accuracy |
+|---|---|---|---|
+| MNL | 3600 | 1.7512 | 0.2150 |
+| DeepMNL | 3600 | 1.7508 | 0.2081 |
+| Set Transformer | 3600 | 1.7508 | 0.2114 |
+
+**All three models are statistically indistinguishable** -- NLL spread is
+0.0004 nats, accuracy spread 0.7 points, both far smaller than anything
+seen in the synthetic benchmark's `context_strength > 0` strata. The Set
+Transformer's synthetic-data advantage has effectively disappeared here.
+This was corrected for in the auto-generated report too:
+`write_bakery_section`'s first draft named a "winner" by raw NLL argmin,
+which was technically true (Set Transformer lowest by 0.0004) but
+misleading at that precision -- overstating noise as a finding. Fixed to
+state the spread explicitly and call it indistinguishable below a 0.01-nat
+threshold, with a dedicated test
+(`test_write_bakery_section_flags_negligible_spread_instead_of_naming_a_winner`)
+so this doesn't regress.
+
+**Why, mechanistically, not just "real data is different":** this is
+explicable, not mysterious, and was anticipated during the loader's design
+(see point 1 above) rather than discovered as a surprise after the fact.
+Negatives are sampled i.i.d. from a fixed marginal popularity
+distribution, independent of which item is chosen or what else is in the
+set. That means a negative's identity carries no information beyond
+overall item popularity -- which MNL's per-item fixed effects already
+capture completely. There is no cross-item substitution or context
+structure of the kind the synthetic decoy effect deliberately injects, so
+there is nothing for attention over the set to exploit; the Bayes-optimal
+solution to *this specific construction* is a saturated per-item
+popularity model, which all three architectures can equally represent.
+This is a genuinely informative negative result, not a failure to find
+something that was there: it shows that whether a set-aware model can
+have any advantage depends critically on whether the *choice-set
+construction* preserves real substitution structure, not just on whether
+the underlying data is "real" vs. "synthetic." A more realistic
+choice-set construction (e.g. negatives drawn from items that empirically
+co-occur with or substitute for the chosen item, rather than population
+marginal popularity) might recover some of the synthetic advantage --
+noted as a natural next step, not attempted here to avoid quietly
+tuning the construction toward a more favorable result after seeing this
+one.

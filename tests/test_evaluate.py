@@ -7,7 +7,8 @@ import torch.nn as nn
 from src.data.synthetic import SyntheticConfig, generate_benchmark
 from src.evaluate import (
     stratified_metrics_from_logits, decoy_shift_by_strength,
-    true_decoy_shift_by_strength, write_comparison_report,
+    true_decoy_shift_by_strength, write_comparison_report, write_bakery_section,
+    BAKERY_SECTION_HEADER,
 )
 
 
@@ -130,3 +131,46 @@ def test_write_comparison_report_produces_readable_markdown(tmp_path):
     assert "decoy-shift" in text.lower() or "decoy_strength" in text.lower()
     assert "1.4300" in text or "1.43" in text  # some MNL NLL value made it in
     assert "## Summary" in text
+
+
+def test_write_bakery_section_appends_without_clobbering_synthetic_content(tmp_path):
+    out_path = tmp_path / "comparison_report.md"
+    out_path.write_text("# Some report\n\nSynthetic results here.\n")
+
+    bakery_metrics = pd.DataFrame([
+        dict(model="MNL", n=1000, nll=2.10, accuracy=0.20),
+        dict(model="DeepMNL", n=1000, nll=2.05, accuracy=0.21),
+        dict(model="Set Transformer", n=1000, nll=2.02, accuracy=0.22),
+    ])
+
+    write_bakery_section(bakery_metrics, out_path, n_items=50, n_sets=1000)
+    text = out_path.read_text()
+
+    assert "Synthetic results here." in text  # original content preserved
+    assert BAKERY_SECTION_HEADER in text
+    assert text.count(BAKERY_SECTION_HEADER) == 1
+    assert "2.0200" in text  # Set Transformer's NLL made it in
+
+    # rerunning should not duplicate the section
+    write_bakery_section(bakery_metrics, out_path, n_items=50, n_sets=1000)
+    text2 = out_path.read_text()
+    assert text2.count(BAKERY_SECTION_HEADER) == 1
+    assert "Synthetic results here." in text2
+
+
+def test_write_bakery_section_flags_negligible_spread_instead_of_naming_a_winner(tmp_path):
+    """A 0.0004-nat spread isn't a meaningful ranking -- naming a "winner"
+    at that precision would overstate noise as signal. The report should
+    say so explicitly rather than just picking the argmin."""
+    out_path = tmp_path / "comparison_report.md"
+    bakery_metrics = pd.DataFrame([
+        dict(model="MNL", n=3600, nll=1.7512, accuracy=0.2150),
+        dict(model="DeepMNL", n=3600, nll=1.7508, accuracy=0.2081),
+        dict(model="Set Transformer", n=3600, nll=1.7508, accuracy=0.2114),
+    ])
+
+    write_bakery_section(bakery_metrics, out_path, n_items=50, n_sets=24000)
+    text = out_path.read_text()
+
+    assert "statistically indistinguishable" in text
+    assert "Lowest NLL:" not in text  # the "meaningful ranking" phrasing shouldn't appear

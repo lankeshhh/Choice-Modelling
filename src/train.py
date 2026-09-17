@@ -1,4 +1,4 @@
-"""Phase 1 training/comparison pipeline.
+"""Synthetic-benchmark training/comparison pipeline.
 
 Generates the synthetic benchmark, trains MNL, DeepMNL, and the Set
 Transformer on identical splits with the same loss and metrics, evaluates

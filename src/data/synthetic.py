@@ -232,7 +232,7 @@ def generate_benchmark(
     n_sets_per_strength: int = 6000,
     seed: Optional[int] = None,
 ):
-    """Generate the full Phase-1 benchmark: one block per decoy_strength value.
+    """Generate the full synthetic benchmark: one block per decoy_strength value.
 
     Returns (df, items, triads).
     """

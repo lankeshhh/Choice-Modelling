@@ -85,7 +85,7 @@ def write_comparison_report(
     present = [m for m in model_order if m in nll_pivot.columns]
 
     lines = []
-    lines.append("# Phase 1 comparison: MNL vs. DeepMNL vs. Set Transformer")
+    lines.append("# Choice modeling comparison: MNL vs. DeepMNL vs. Set Transformer")
     lines.append("")
     lines.append(
         "Synthetic benchmark with an injected asymmetric-dominance (decoy) "
@@ -177,3 +177,87 @@ def write_comparison_report(
     out_path = str(out_path)
     with open(out_path, "w") as f:
         f.write("\n".join(lines) + "\n")
+
+
+BAKERY_SECTION_HEADER = "## Real-data validation: Bakery"
+
+
+def write_bakery_section(metrics_df: pd.DataFrame, out_path, n_items: int, n_sets: int) -> None:
+    """Append (idempotently) a real-data section to the existing
+    comparison_report.md, produced by write_comparison_report above. Does
+    NOT overwrite the synthetic results -- reads the file, strips any
+    previously-appended Bakery section (so reruns don't duplicate it), and
+    appends a fresh one.
+
+    No Bayes-optimal row and no decoy-shift diagnostic here: there is no
+    known true utility for real data, and no injected decoy effect to
+    measure recovery of. Just NLL and accuracy for the three models,
+    reported directly.
+    """
+    out_path = str(out_path)
+    try:
+        with open(out_path) as f:
+            existing = f.read()
+    except FileNotFoundError:
+        existing = ""
+
+    marker = existing.find(BAKERY_SECTION_HEADER)
+    if marker != -1:
+        existing = existing[:marker].rstrip() + "\n"
+
+    lines = [BAKERY_SECTION_HEADER, ""]
+    lines.append(
+        "Same models, same shared harness (`featurize`, `build_padded_tensors`, "
+        "`grouped_split`, `train_choice_model`), same train/val/test discipline "
+        "as the synthetic experiment above -- only the data loading differs. "
+        "This checks whether the Set Transformer's advantage from the "
+        "controlled synthetic experiment holds up on real purchase data, "
+        "reported honestly whatever the result turns out to be. See "
+        "`src/data/bakery.py` and `decisions.md` for the full data-construction "
+        "methodology and its limitations -- in particular, this is basket "
+        "(subset-selection) data with a constructed choice set, not a dataset "
+        "of actual presented assortments, and items carry no real attributes "
+        "(price/quality are unavailable; `category` is each item's own identity)."
+    )
+    lines.append("")
+    lines.append(f"Data: [Benson, Kumar & Tomkins (WSDM 2018)](https://github.com/arbenson/discrete-subset-choice) "
+                  f"bakery basket dataset, {n_items} items, {n_sets:,} choice sets "
+                  f"(subsampled to match the synthetic benchmark's scale).")
+    lines.append("")
+    lines.append("No Bayes-optimal reference and no decoy-shift diagnostic here -- there is "
+                  "no known true utility for real data, and no injected effect to check "
+                  "recovery of.")
+    lines.append("")
+
+    header = ["model", "n", "nll", "accuracy"]
+    md_lines = ["| " + " | ".join(header) + " |", "|" + "---|" * len(header)]
+    for _, row in metrics_df.sort_values("model").iterrows():
+        md_lines.append(f"| {row['model']} | {int(row['n'])} | {row['nll']:.4f} | {row['accuracy']:.4f} |")
+    lines.append("\n".join(md_lines))
+    lines.append("")
+
+    nll_spread = metrics_df["nll"].max() - metrics_df["nll"].min()
+    best = metrics_df.loc[metrics_df["nll"].idxmin(), "model"]
+    worst = metrics_df.loc[metrics_df["nll"].idxmax(), "model"]
+    # A spread this small isn't a meaningful ranking -- naming a "winner" at
+    # the 4th decimal would overstate noise as signal. State that plainly
+    # rather than let a trivial ordering read as a finding.
+    if nll_spread < 0.01:
+        lines.append(
+            f"NLL spread across all three models is {nll_spread:.4f} nats "
+            f"({best} lowest, {worst} highest) -- statistically indistinguishable, "
+            f"not a meaningful ranking. Compare this to the synthetic benchmark's "
+            f"much larger, systematic margins above: on this real-data construction, "
+            f"the Set Transformer's advantage has effectively disappeared."
+        )
+    else:
+        lines.append(
+            f"Lowest NLL: {best}. Highest NLL: {worst} (spread {nll_spread:.4f} nats). "
+            f"Compare this margin to the synthetic-benchmark margins above -- whether "
+            f"the Transformer's synthetic-data advantage shrinks, holds, or disappears "
+            f"on real data is exactly the question this section exists to answer "
+            f"honestly, not to confirm a predetermined story."
+        )
+
+    with open(out_path, "w") as f:
+        f.write(existing.rstrip() + "\n\n" + "\n".join(lines) + "\n")
