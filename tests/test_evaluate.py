@@ -8,7 +8,7 @@ from src.data.synthetic import SyntheticConfig, generate_benchmark
 from src.evaluate import (
     stratified_metrics_from_logits, decoy_shift_by_strength,
     true_decoy_shift_by_strength, write_comparison_report, write_bakery_section,
-    BAKERY_SECTION_HEADER,
+    BAKERY_SECTION_HEADER, compute_composition_leakage_rate,
 )
 
 
@@ -174,3 +174,52 @@ def test_write_bakery_section_flags_negligible_spread_instead_of_naming_a_winner
 
     assert "statistically indistinguishable" in text
     assert "Lowest NLL:" not in text  # the "meaningful ranking" phrasing shouldn't appear
+
+
+def test_compute_composition_leakage_rate_matches_manual_computation():
+    # 4 choice sets, 2 items each: set 0 and set 2 share the exact same
+    # (chosen, full item set) composition -- {chosen=1, items={1,2}}.
+    # set 1 is a distinct composition. set 3 (test) is unique to test.
+    df = pd.DataFrame([
+        dict(choice_set_id=0, item_id=1, chosen=1),
+        dict(choice_set_id=0, item_id=2, chosen=0),
+        dict(choice_set_id=1, item_id=3, chosen=1),
+        dict(choice_set_id=1, item_id=4, chosen=0),
+        dict(choice_set_id=2, item_id=1, chosen=1),  # same composition as set 0
+        dict(choice_set_id=2, item_id=2, chosen=0),
+        dict(choice_set_id=3, item_id=5, chosen=1),  # unique
+        dict(choice_set_id=3, item_id=6, chosen=0),
+    ])
+    train_ids = {0, 1}
+    test_ids = {2, 3}  # set 2 leaks (matches set 0), set 3 doesn't
+
+    rate = compute_composition_leakage_rate(df, train_ids, test_ids)
+    assert rate == pytest.approx(0.5)  # 1 of 2 test sets leaked
+
+
+def test_compute_composition_leakage_rate_zero_when_all_distinct():
+    df = pd.DataFrame([
+        dict(choice_set_id=0, item_id=1, chosen=1),
+        dict(choice_set_id=0, item_id=2, chosen=0),
+        dict(choice_set_id=1, item_id=3, chosen=1),
+        dict(choice_set_id=1, item_id=4, chosen=0),
+    ])
+    rate = compute_composition_leakage_rate(df, train_ids={0}, test_ids={1})
+    assert rate == 0.0
+
+
+def test_write_bakery_section_includes_leakage_caveat_when_provided(tmp_path):
+    out_path = tmp_path / "comparison_report.md"
+    bakery_metrics = pd.DataFrame([
+        dict(model="MNL", n=3600, nll=0.4740, accuracy=0.7742),
+        dict(model="DeepMNL", n=3600, nll=0.4667, accuracy=0.7747),
+        dict(model="Set Transformer", n=3600, nll=0.3253, accuracy=0.8611),
+    ])
+
+    write_bakery_section(bakery_metrics, out_path, n_items=50, n_sets=24000,
+                          negative_sampling="substitute", leakage_rate=0.259)
+    text = out_path.read_text()
+
+    assert "25.9%" in text
+    assert "substitute" in text
+    assert "not driven by memorized compositions" in text

@@ -2,7 +2,10 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from src.data.bakery import build_bakery_dataset, load_raw_baskets, DEFAULT_PATH
+from src.data.bakery import (
+    build_bakery_dataset, load_raw_baskets, DEFAULT_PATH,
+    compute_cooccurrence_and_substitute_similarity,
+)
 
 
 def test_raw_baskets_load():
@@ -94,3 +97,69 @@ def test_full_scale_default_matches_synthetic_benchmark_size():
     df, n_items = build_bakery_dataset(n_transactions=24000, seed=0)
     assert df["choice_set_id"].nunique() == 24000
     assert n_items == 50
+
+
+def test_profile_similarity_is_not_just_direct_cooccurrence():
+    """The substitute proxy (profile similarity: do two items tend to
+    co-occur with the same OTHER items) must be measuring something
+    genuinely different from direct co-occurrence (do the two items
+    co-occur with EACH OTHER) -- the latter is a complementarity signal
+    (bought together), not a substitutability one. If the two were highly
+    correlated, "substitute" sampling would just be re-discovering
+    complements under a different name. Checked once interactively before
+    committing to this design (see decisions.md): r=0.015 across all pairs,
+    and a popular item's top-5 by each measure overlapped in only 2/5."""
+    n_items = 50
+    baskets = load_raw_baskets()
+    cooc, sim = compute_cooccurrence_and_substitute_similarity(baskets, n_items)
+
+    iu = np.triu_indices(n_items, k=1)
+    corr = np.corrcoef(cooc[iu], sim[iu])[0, 1]
+    assert abs(corr) < 0.15, f"profile similarity too correlated with direct co-occurrence: r={corr:.3f}"
+
+
+def test_substitute_sampling_concentrates_on_higher_similarity_negatives():
+    """The model-free check this whole design change hinges on: does
+    negative_sampling="substitute" actually produce negatives closer to
+    the chosen item's profile than negative_sampling="popularity" does,
+    without also becoming more complementary (higher direct co-occurrence)?
+    If this doesn't hold, there's no point retraining any models on it.
+
+    Grounded in an interactive run before writing these thresholds (not
+    guessed): substitute scheme's mean profile-similarity was 0.6935 vs.
+    popularity's 0.4708 (population-wide mean 0.5134 for context) --
+    substitute sits clearly above the population baseline, popularity
+    clearly below it. Mean direct co-occurrence was 379 (substitute) vs.
+    345 (popularity) vs. 343.75 population mean -- both close to baseline,
+    confirming the substitute scheme is not accidentally selecting
+    complements."""
+    n_items = 50
+    baskets = load_raw_baskets()
+    cooc, sim = compute_cooccurrence_and_substitute_similarity(baskets, n_items)
+    iu = np.triu_indices(n_items, k=1)
+    population_mean_sim = sim[iu].mean()
+
+    def mean_chosen_negative_similarity(negative_sampling):
+        df, _ = build_bakery_dataset(n_transactions=2000, seed=0, negative_sampling=negative_sampling)
+        sims = []
+        for _, g in df.groupby("choice_set_id"):
+            chosen = int(g.loc[g["chosen"] == 1, "item_id"].iloc[0])
+            negs = g.loc[g["chosen"] == 0, "item_id"].astype(int).to_numpy()
+            sims.extend(sim[chosen - 1, negs - 1])
+        return np.mean(sims)
+
+    sim_popularity = mean_chosen_negative_similarity("popularity")
+    sim_substitute = mean_chosen_negative_similarity("substitute")
+
+    assert sim_substitute > population_mean_sim, (
+        f"substitute scheme's mean similarity ({sim_substitute:.4f}) should exceed "
+        f"the population baseline ({population_mean_sim:.4f})"
+    )
+    assert sim_popularity < population_mean_sim, (
+        f"popularity scheme's mean similarity ({sim_popularity:.4f}) should sit below "
+        f"the population baseline ({population_mean_sim:.4f}) -- it isn't targeting similarity at all"
+    )
+    assert sim_substitute - sim_popularity > 0.15, (
+        f"substitute scheme ({sim_substitute:.4f}) not meaningfully more concentrated "
+        f"than popularity scheme ({sim_popularity:.4f})"
+    )

@@ -43,14 +43,16 @@ This is a partial, honest result, not a clean win: the Set Transformer is direct
 
 Same models, same shared harness (`featurize`, `build_padded_tensors`, `grouped_split`, `train_choice_model`), same train/val/test discipline as the synthetic experiment above -- only the data loading differs. This checks whether the Set Transformer's advantage from the controlled synthetic experiment holds up on real purchase data, reported honestly whatever the result turns out to be. See `src/data/bakery.py` and `decisions.md` for the full data-construction methodology and its limitations -- in particular, this is basket (subset-selection) data with a constructed choice set, not a dataset of actual presented assortments, and items carry no real attributes (price/quality are unavailable; `category` is each item's own identity).
 
-Data: [Benson, Kumar & Tomkins (WSDM 2018)](https://github.com/arbenson/discrete-subset-choice) bakery basket dataset, 50 items, 24,000 choice sets (subsampled to match the synthetic benchmark's scale).
+Data: [Benson, Kumar & Tomkins (WSDM 2018)](https://github.com/arbenson/discrete-subset-choice) bakery basket dataset, 50 items, 24,000 choice sets (subsampled to match the synthetic benchmark's scale). Negative sampling: `substitute` -- see decisions.md for what this means and why it matters a great deal to the result below.
 
 No Bayes-optimal reference and no decoy-shift diagnostic here -- there is no known true utility for real data, and no injected effect to check recovery of.
 
+**Caveat, checked and found not to explain the result below (full investigation in decisions.md):** 25.9% of test-set choice-set compositions also appear verbatim in the training set -- a consequence of a small, fixed item catalog with per-item substitute pools, not a bug in the train/val/test split (which still correctly prevents any single observation from straddling train and test). Evaluated the leaked and clean test subsets separately: the model gaps below were essentially identical on both, meaning the result is not driven by memorized compositions.
+
 | model | n | nll | accuracy |
 |---|---|---|---|
-| DeepMNL | 3600 | 1.7508 | 0.2081 |
-| MNL | 3600 | 1.7512 | 0.2150 |
-| Set Transformer | 3600 | 1.7508 | 0.2114 |
+| DeepMNL | 3600 | 0.4667 | 0.7747 |
+| MNL | 3600 | 0.4740 | 0.7742 |
+| Set Transformer | 3600 | 0.3253 | 0.8611 |
 
-NLL spread across all three models is 0.0004 nats (Set Transformer lowest, MNL highest) -- statistically indistinguishable, not a meaningful ranking. Compare this to the synthetic benchmark's much larger, systematic margins above: on this real-data construction, the Set Transformer's advantage has effectively disappeared.
+Lowest NLL: Set Transformer. Highest NLL: MNL (spread 0.1487 nats). Compare this margin to the synthetic-benchmark margins above -- whether the Transformer's synthetic-data advantage shrinks, holds, or disappears on real data is exactly the question this section exists to answer honestly, not to confirm a predetermined story.

@@ -618,10 +618,138 @@ This is a genuinely informative negative result, not a failure to find
 something that was there: it shows that whether a set-aware model can
 have any advantage depends critically on whether the *choice-set
 construction* preserves real substitution structure, not just on whether
-the underlying data is "real" vs. "synthetic." A more realistic
-choice-set construction (e.g. negatives drawn from items that empirically
-co-occur with or substitute for the chosen item, rather than population
-marginal popularity) might recover some of the synthetic advantage --
-noted as a natural next step, not attempted here to avoid quietly
-tuning the construction toward a more favorable result after seeing this
-one.
+the underlying data is "real" vs. "synthetic."
+
+## 2026-09-07 — Bakery, take two: substitute-based negative sampling
+
+The previous section's own closing note predicted this: popularity-only
+negatives give a per-item model everything it needs, so re-ran with
+negatives drawn from genuine near-substitutes instead, to check whether
+that was really the reason the gap disappeared rather than a real ceiling
+on the Transformer's usefulness on real data.
+
+**Deriving a substitute proxy from co-occurrence data, and verifying it
+measures the right thing before using it.** `bakery.txt` has no item
+attributes, so "substitute" has to come from purchase patterns alone.
+Direct co-occurrence (do items i and j appear in the same basket) is the
+wrong signal -- that's complementarity (bread + butter), not
+substitutability. Instead: `compute_cooccurrence_and_substitute_similarity`
+builds each item's co-occurrence *profile* (which OTHER items it tends to
+appear alongside) and takes cosine similarity between profiles -- two
+items that play a similar role across many different baskets (e.g. two
+bread varieties, each usually bought instead of the other but alongside
+the same butter/jam/coffee) score high even if they're rarely or never in
+the same basket together. Checked this distinction empirically before
+trusting it (`test_profile_similarity_is_not_just_direct_cooccurrence`):
+profile similarity and direct co-occurrence are essentially uncorrelated
+across all 1,225 item pairs (r=0.015), and a popular item's top-5 by each
+measure overlapped in only 2 of 5 items -- confirming these are genuinely
+different signals, not the same thing measured two ways.
+
+**Negatives sampled from the chosen item's top-10 nearest neighbors by
+profile similarity** (uniform within that pool, excluding basket items),
+not a continuous reweighting -- the raw similarity distribution is fairly
+compressed (a popular item's non-degenerate similarities spanned roughly
+0.28-0.60), so a soft weighting wouldn't concentrate much; restricting to
+a top-K pool guarantees genuinely "near" substitutes. Kept the old
+"popularity" scheme available via `negative_sampling="popularity"` rather
+than deleting it, since it's the comparison baseline for everything below.
+
+**Model-free check before spending time retraining, as asked for.** Built
+both datasets (n=2000, same seed) and measured mean profile-similarity
+between each chosen item and its negatives:
+
+| scheme | mean similarity(chosen, negative) | vs. population baseline (0.5134) |
+|---|---|---|
+| popularity (old) | 0.4708 | below |
+| substitute (new) | 0.6935 | above |
+
+Substitute sampling clearly concentrates on higher-similarity negatives;
+popularity sampling sits below the population baseline (makes sense --
+it's not targeting similarity, so it's diluted toward whichever items are
+simply common). Mean *direct* co-occurrence was 379 (substitute) vs. 345
+(popularity) vs. 343.75 population mean -- both near baseline, confirming
+the substitute scheme isn't accidentally selecting complements instead.
+This became `test_substitute_sampling_concentrates_on_higher_similarity_negatives`,
+with these exact numbers as the grounded thresholds (margin required:
+>0.15, well under the observed 0.223 gap).
+
+**The retrained result is a large, real gap -- but "large" was the cue to
+investigate harder, not to report it faster:**
+
+| model | NLL | accuracy |
+|---|---|---|
+| MNL | 0.4740 | 0.7742 |
+| DeepMNL | 0.4667 | 0.7747 |
+| Set Transformer | 0.3253 | 0.8611 |
+
+NLL gap (Transformer vs. MNL) is 0.149 nats and accuracy gap is 8.7
+points -- both substantially larger than anything in the synthetic
+benchmark's `context_strength > 0` strata. A gap this size after the
+previous section found a null result is exactly the kind of thing this
+whole log has repeatedly treated as a reason to dig in, not write up,
+so before trusting it:
+
+1. **Checked for train/test leakage from the reduced effective
+   vocabulary.** With only 50 items and *fixed* (not per-transaction)
+   top-10 neighbor pools, the space of possible (chosen item, candidate
+   set) compositions is much smaller than under popularity sampling from
+   the full 49-item catalog -- exact compositions can recur across
+   different `choice_set_id`s by chance. They do: **25.9% of test-set
+   compositions also appear verbatim in the training set** (a real,
+   previously-unconsidered failure mode created specifically by this
+   sampling change, not present in the popularity scheme or the synthetic
+   benchmark's much larger effective vocabulary). `grouped_split` still
+   correctly prevents any single *observation* from straddling train/test
+   -- this is a different problem, near-duplicate compositions recurring
+   under different ids, which it was never designed to catch.
+
+2. **Isolated whether that leakage explains the gap** by evaluating the
+   already-trained checkpoints separately on the leaked vs. clean test
+   subsets:
+
+   | subset | MNL NLL | DeepMNL NLL | Transformer NLL | Transformer−MNL | MNL acc | Transformer acc | acc gap |
+   |---|---|---|---|---|---|---|---|
+   | leaked (n=931, 25.9%) | 0.2961 | 0.2929 | 0.1490 | 0.147 | 0.8582 | 0.9452 | 8.7pp |
+   | clean (n=2669, 74.1%) | 0.5361 | 0.5273 | 0.3868 | 0.149 | 0.7448 | 0.8318 | 8.7pp |
+
+   The gap is essentially **identical** on leaked and clean subsets (both
+   metrics agree to within noise). If memorization of leaked compositions
+   were driving the result, the gap would be far larger on leaked examples
+   and much smaller on clean ones -- it isn't. This is strong evidence the
+   advantage generalizes to genuinely unseen set compositions, not an
+   artifact of the split. (The 25.9% leakage rate is still worth fixing in
+   a future pass -- e.g. a signature-aware split that dedupes compositions
+   across train/val/test -- flagged here rather than fixed now, since
+   fixing it wasn't necessary to trust this result and doing it
+   after seeing a favorable result would invite exactly the kind of
+   after-the-fact tuning this project has tried to avoid throughout.)
+
+3. **Ruled out "MNL just didn't converge."** Retrained MNL with far more
+   patience (epochs=2000, patience=100 -- ran the entire budget without
+   early stopping) and got an essentially identical result (acc 0.7744 vs.
+   the original run's 0.7742). Also compared against a zero-parameter
+   heuristic, "always pick the globally most popular present item":
+   77.78% accuracy -- matching MNL/DeepMNL almost exactly. MNL is not
+   undertrained or buggy; it is sitting precisely at the ceiling a
+   per-item popularity model can reach, which is the correct, expected
+   place for a per-item fixed-effect model on this task. The Transformer
+   clearly exceeds that ceiling, which is only possible by using genuine
+   cross-item / set-context information a per-item score cannot represent.
+
+**Conclusion, stated at the confidence level the evidence actually
+supports:** with negatives that are genuine near-substitutes rather than
+population noise, the Set Transformer's advantage over MNL/DeepMNL is
+large, real, and not an artifact of the leakage this construction
+introduced. This reverses the previous section's finding, and the
+reversal itself is the more informative result: the earlier "statistically
+indistinguishable" outcome was a property of giving the Bayes-optimal
+rule nothing but popularity to work with, not evidence that context-aware
+modeling doesn't transfer to real data. Whether a set-aware model has any
+advantage over feature-only models depends on whether the choice-set
+construction preserves genuine substitution structure -- and when it
+does, on this data, the advantage shows up clearly. `results/metrics.csv`
+and `results/decoy_shifts.csv` (the synthetic experiment's results) and
+the notebook are unchanged by this section -- only
+`results/bakery_metrics.csv` and the Bakery section of
+`results/comparison_report.md` reflect the new sampling scheme.

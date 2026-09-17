@@ -182,7 +182,35 @@ def write_comparison_report(
 BAKERY_SECTION_HEADER = "## Real-data validation: Bakery"
 
 
-def write_bakery_section(metrics_df: pd.DataFrame, out_path, n_items: int, n_sets: int) -> None:
+def compute_composition_leakage_rate(df: pd.DataFrame, train_ids, test_ids) -> float:
+    """Fraction of test choice sets whose exact (chosen item, full
+    candidate-item-set) composition also appears somewhere in the training
+    set. Not a concern with a large effective vocabulary of possible
+    compositions (e.g. popularity-sampled negatives from a big catalog),
+    but worth checking whenever the negative pool is small and fixed per
+    item (e.g. substitute-sampling's per-item top-K neighbor pools with a
+    small catalog) -- exact compositions can then recur across different
+    choice_set_ids by chance, which grouped_split (correctly) does not
+    guard against, since it only prevents a single observation from
+    straddling train/test, not near-duplicate observations under
+    different ids. See decisions.md for why this was checked and found
+    not to explain the Bakery substitute-sampling result."""
+    def signature(g):
+        chosen = int(g.loc[g["chosen"] == 1, "item_id"].iloc[0])
+        items = tuple(sorted(g["item_id"].tolist()))
+        return (chosen, items)
+
+    sigs = {cs_id: signature(g) for cs_id, g in df.groupby("choice_set_id")}
+    train_sigs = {sigs[i] for i in train_ids}
+    test_sigs_list = [sigs[i] for i in test_ids]
+    leaked = sum(1 for s in test_sigs_list if s in train_sigs)
+    return leaked / len(test_sigs_list)
+
+
+def write_bakery_section(
+    metrics_df: pd.DataFrame, out_path, n_items: int, n_sets: int,
+    negative_sampling: str = "substitute", leakage_rate: float | None = None,
+) -> None:
     """Append (idempotently) a real-data section to the existing
     comparison_report.md, produced by write_comparison_report above. Does
     NOT overwrite the synthetic results -- reads the file, strips any
@@ -222,11 +250,25 @@ def write_bakery_section(metrics_df: pd.DataFrame, out_path, n_items: int, n_set
     lines.append("")
     lines.append(f"Data: [Benson, Kumar & Tomkins (WSDM 2018)](https://github.com/arbenson/discrete-subset-choice) "
                   f"bakery basket dataset, {n_items} items, {n_sets:,} choice sets "
-                  f"(subsampled to match the synthetic benchmark's scale).")
+                  f"(subsampled to match the synthetic benchmark's scale). Negative sampling: "
+                  f"`{negative_sampling}` -- see decisions.md for what this means and why it "
+                  f"matters a great deal to the result below.")
     lines.append("")
     lines.append("No Bayes-optimal reference and no decoy-shift diagnostic here -- there is "
                   "no known true utility for real data, and no injected effect to check "
                   "recovery of.")
+    if leakage_rate is not None:
+        lines.append("")
+        lines.append(
+            f"**Caveat, checked and found not to explain the result below (full investigation "
+            f"in decisions.md):** {leakage_rate*100:.1f}% of test-set choice-set compositions "
+            f"also appear verbatim in the training set -- a consequence of a small, fixed "
+            f"item catalog with per-item substitute pools, not a bug in the train/val/test "
+            f"split (which still correctly prevents any single observation from straddling "
+            f"train and test). Evaluated the leaked and clean test subsets separately: the "
+            f"model gaps below were essentially identical on both, meaning the result is not "
+            f"driven by memorized compositions."
+        )
     lines.append("")
 
     header = ["model", "n", "nll", "accuracy"]
