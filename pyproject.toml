@@ -1,0 +1,23 @@
+[project]
+name = "choice-modeling"
+version = "0.1.0"
+description = "Phase 1: synthetic-data comparison of MNL, DeepMNL, and a set-aware Transformer on assortment-dependent choice."
+requires-python = ">=3.10"
+dependencies = [
+    "numpy",
+    "pandas",
+    "torch",
+    "scipy",
+    "matplotlib",
+    "tqdm",
+]
+
+[project.optional-dependencies]
+dev = ["pytest", "jupyter", "ipykernel"]
+
+[tool.setuptools]
+packages = ["src", "src.data", "src.models"]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
