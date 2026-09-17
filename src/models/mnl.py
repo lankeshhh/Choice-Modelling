@@ -139,3 +139,39 @@ def fit_mnl_scipy(X: np.ndarray, mask: np.ndarray, y: np.ndarray):
     result = minimize(mnl_nll_and_grad, theta0, args=(X, mask, y), jac=True, method="BFGS")
     w = result.x
     return w, result.fun, result
+
+
+def mnl_hessian(theta: np.ndarray, X: np.ndarray, mask: np.ndarray) -> np.ndarray:
+    """Analytic Hessian of the *summed* (not mean) NLL, i.e. the observed
+    Fisher information matrix at theta.
+
+    Closed form for conditional/multinomial logit: for each choice set n
+    with softmax probabilities p_n over its items,
+
+        H_n = X_n^T (diag(p_n) - p_n p_n^T) X_n
+        H   = sum_n H_n
+
+    This is the same formula used for standard errors in any conditional
+    logit / mlogit package. Notably it does not depend on y -- for the
+    multinomial-logit (canonical exponential family) case, observed and
+    expected Fisher information coincide, so the Hessian is a function of
+    theta and the covariates alone.
+    """
+    logits = X @ theta
+    _, exp_shifted, row_sum = _masked_logsumexp(logits, mask)
+    p = exp_shifted / row_sum  # (n_sets, set_size), 0 at masked positions
+
+    weighted_x = X * p[..., None]  # p_i * x_i, (n_sets, set_size, dim)
+    term1 = np.einsum("nsd,nse->de", weighted_x, X)  # sum_{n,i} p_i x_i x_i^T
+    s_n = weighted_x.sum(axis=1)  # (n_sets, dim), = X_n^T p_n per set
+    term2 = np.einsum("nd,ne->de", s_n, s_n)  # sum_n outer(s_n, s_n)
+    return term1 - term2
+
+
+def mnl_standard_errors(theta: np.ndarray, X: np.ndarray, mask: np.ndarray):
+    """Asymptotic covariance / standard errors of the MLE, from the inverse
+    of the observed Fisher information (mnl_hessian, summed-NLL scale)."""
+    H = mnl_hessian(theta, X, mask)
+    cov = np.linalg.inv(H)
+    se = np.sqrt(np.diag(cov))
+    return se, cov

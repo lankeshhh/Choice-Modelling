@@ -167,3 +167,51 @@ where MNL is structurally missing the boost term, not a suspiciously clean
 result (strata are small here, ~130-140 test sets each, so the exact
 numbers aren't perfectly monotonic in γ -- expected sampling noise at this
 sample size, not evidence of a problem).
+
+**Coefficient recovery, not just NLL, at `context_strength == 0`.**
+Near-Bayes-optimal NLL doesn't by itself prove the individual coefficients
+were recovered -- a model that's misspecified in a way that doesn't cost
+much likelihood could still land on the wrong weights. Added
+`mnl_hessian`/`mnl_standard_errors` to `mnl.py`: the closed-form observed
+Fisher information for conditional/multinomial logit,
+`H = sum_n X_n^T (diag(p_n) - p_n p_n^T) X_n` (summed-NLL scale; notably
+independent of y, since observed and expected information coincide for
+this canonical-exponential-family case). Verified against finite
+differences of the analytic gradient first (max abs diff 2e-9 on a small
+sample) before trusting it for anything, same pattern as the gradient
+check.
+
+Fit MNL via `fit_mnl_scipy` on the full `context_strength == 0` subset of
+the default benchmark (21,332 of 24,000 sets -- every plain and
+decoy_control set across all γ blocks, plus the entire γ=0 block including
+its "decoy_treated" sets, since a boost of 0 has no effect) and compared
+fitted coefficients to the true generative values: `cfg.beta_price`,
+`cfg.beta_quality`, and the *realized* per-category effects `alpha[c]`
+from `build_item_universe` (not the config's `category_effect_std` scalar
+-- alpha is drawn per-seed). Since category is encoded as K-1 dummies
+relative to category 0, the comparanda for the fitted category weights are
+`alpha[c] - alpha[0]`, not `alpha[c]` itself.
+
+| param | true | fitted | se | 95% CI | z |
+|---|---|---|---|---|---|
+| beta_price | -0.1200 | -0.1233 | 0.0098 | [-0.1426, -0.1041] | -0.34 |
+| beta_quality | 1.0000 | 1.0004 | 0.0131 | [0.9746, 1.0262] | 0.03 |
+| alpha[1]-alpha[0] | 1.3865 | 1.3745 | 0.0332 | [1.3094, 1.4397] | -0.36 |
+| alpha[2]-alpha[0] | 1.3025 | 1.2893 | 0.0302 | [1.2301, 1.3485] | -0.44 |
+| alpha[3]-alpha[0] | 1.0202 | 0.9885 | 0.0318 | [0.9262, 1.0508] | -1.00 |
+| alpha[4]-alpha[0] | 0.7618 | 0.7659 | 0.0303 | [0.7066, 0.8252] | 0.14 |
+
+All six parameters land inside their 95% CI with `|z| <= 1.00` -- no
+systematic bias in any direction, consistent with pure sampling noise
+rather than a real gap. Cross-checked the Hessian-based SEs against a
+200-resample bootstrap (resample choice sets with replacement, refit each
+time): bootstrap/Hessian SE ratios were 0.99-1.08 across all six
+parameters, i.e. the two independent SE estimates agree closely, so the
+asymptotic-normality assumption behind the Hessian-based CIs isn't doing
+anything suspicious here. Added
+`test_mnl_recovers_true_coefficients_at_zero_context_strength` as a
+permanent regression test (on the smaller test fixture, so a looser
+`|z| < 4` threshold than the large-sample table above) -- this is the kind
+of thing that could silently break (e.g. if a future refactor reintroduced
+the one-hot identifiability bug) without moving NLL enough to be caught by
+the Bayes-optimal check alone.

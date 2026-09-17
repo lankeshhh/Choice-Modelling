@@ -7,7 +7,10 @@ from src.utils import (
     set_seed, build_padded_tensors, build_true_utility_tensor, grouped_split,
     select_by_ids, feature_dim, accuracy, mean_nll, bayes_optimal_nll,
 )
-from src.models.mnl import fit_mnl_pytorch, fit_mnl_scipy, mnl_nll_and_grad, MNL
+from src.models.mnl import (
+    fit_mnl_pytorch, fit_mnl_scipy, mnl_nll_and_grad, mnl_hessian,
+    mnl_standard_errors, MNL,
+)
 
 
 @pytest.fixture(scope="module")
@@ -20,7 +23,7 @@ def benchmark():
     tensors, meta = build_padded_tensors(df, cfg.n_categories)
     true_u = build_true_utility_tensor(df, tensors[0].shape[1])
     train_ids, val_ids, test_ids = grouped_split(meta, seed=0)
-    return dict(cfg=cfg, df=df, tensors=tensors, meta=meta, true_u=true_u,
+    return dict(cfg=cfg, df=df, items=items, tensors=tensors, meta=meta, true_u=true_u,
                 train_ids=train_ids, val_ids=val_ids, test_ids=test_ids)
 
 
@@ -103,6 +106,36 @@ def test_analytic_gradient_matches_finite_differences(benchmark):
     assert np.allclose(grad, numeric_grad, atol=1e-4)
 
 
+def test_analytic_hessian_matches_finite_differences(benchmark):
+    """Check mnl_hessian (used for standard errors) against numerical
+    differentiation of the analytic gradient, the same way the gradient
+    itself is checked against finite differences of the NLL."""
+    tensors, meta = benchmark["tensors"], benchmark["meta"]
+    train_tensors, _ = select_by_ids(tensors, meta, benchmark["train_ids"])
+    X, mask, y = train_tensors
+    X, mask, y = X.numpy()[:80], mask.numpy()[:80], y.numpy()[:80]
+    dim = X.shape[2]
+    n_sets = X.shape[0]
+    rng = np.random.default_rng(1)
+    theta = rng.normal(scale=0.2, size=dim)
+
+    H_analytic = mnl_hessian(theta, X, mask)
+
+    eps = 1e-5
+    H_numeric = np.zeros((dim, dim))
+    for i in range(dim):
+        tp, tm = theta.copy(), theta.copy()
+        tp[i] += eps
+        tm[i] -= eps
+        _, gp = mnl_nll_and_grad(tp, X, mask, y)
+        _, gm = mnl_nll_and_grad(tm, X, mask, y)
+        # mnl_nll_and_grad's gradient is of the MEAN nll; mnl_hessian is of
+        # the SUMMED nll (observed Fisher information), so scale by n_sets
+        H_numeric[i] = n_sets * (gp - gm) / (2 * eps)
+
+    assert np.allclose(H_analytic, H_numeric, atol=1e-4)
+
+
 def test_mnl_near_bayes_optimal_at_zero_context_strength(benchmark):
     """At context_strength == 0 the data is exactly correctly-specified MNL
     (no boost applied anywhere in that slice), so a well-fit MNL's held-out
@@ -139,3 +172,34 @@ def test_mnl_near_bayes_optimal_at_zero_context_strength(benchmark):
         f"fitted MNL NLL ({fitted_nll:.4f}) too far above Bayes-optimal ({bayes_nll:.4f}) "
         "at context_strength=0, where MNL is correctly specified"
     )
+
+
+def test_mnl_recovers_true_coefficients_at_zero_context_strength(benchmark):
+    """Near-Bayes-optimal NLL doesn't by itself prove the individual
+    coefficients are recovered -- a misspecified-but-flexible model could
+    hit similar NLL with different weights. Fit MNL on the context_strength
+    == 0 slice (the only slice where MNL is correctly specified) and check
+    every true parameter (beta_price, beta_quality, and the K-1 relative
+    category effects) falls within a wide multiple of its Hessian-based
+    standard error -- a real coefficient-recovery check, not just a fit
+    quality one. Threshold is |z| < 4 (not the usual 1.96) since this is a
+    bug-catching regression test on a fairly small fixture, not a
+    from-scratch significance test; see the interactive run in
+    decisions.md for the tight, large-sample version (all |z| < 1)."""
+    cfg, df, items = benchmark["cfg"], benchmark["df"], benchmark["items"]
+    zero_ctx_df = df[df["context_strength"] == 0.0]
+
+    tensors, _ = build_padded_tensors(zero_ctx_df, cfg.n_categories)
+    X, mask, y = tensors
+    X, mask, y = X.numpy(), mask.numpy(), y.numpy()
+
+    w_hat, nll, result = fit_mnl_scipy(X, mask, y)
+    assert result.success
+    se, _ = mnl_standard_errors(w_hat, X, mask)
+
+    alpha = items.drop_duplicates("category").sort_values("category")["category_effect"].to_numpy()
+    true_rel_alpha = alpha[1:] - alpha[0]
+    true_vals = np.concatenate([[cfg.beta_price, cfg.beta_quality], true_rel_alpha])
+
+    z = (w_hat - true_vals) / se
+    assert np.all(np.abs(z) < 4), f"coefficient recovery z-scores out of range: {z}"
